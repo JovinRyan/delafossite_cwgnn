@@ -1,0 +1,82 @@
+# === Python Cache and Bytecode ===
+__pycache__/
+*/__pycache__/
+*.py[cod]
+*$py.class
+
+# === Environment and Dependency Files ===
+.env
+.venv/
+env/
+venv/
+Pipfile.lock
+poetry.lock
+
+# === Build Artifacts ===
+*.egg-info/
+*.egg
+dist/
+build/
+
+# === Test and Notebook Artifacts ===
+*testing*
+*.ipynb_checkpoints/
+*.log
+
+# === Data and Output Files ===
+*.csv
+*.json
+*.pkl
+*.npz
+*.h5
+*.db
+*.sqlite
+
+# === Keep necessary data files ===
+!delafossite_cwgnn/data/*.csv
+
+# === OS-generated files ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Jupyter Notebook Hidden Files ===
+.ipynb_checkpoints/
+
+# === Editor/IDE Files ===
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+
+# === Pytest Cache ===
+.pytest_cache/
+
+# === Coverage Reports ===
+htmlcov/
+.coverage
+.tox/
+.nox/
+coverage.xml
+.cache
+
+# === Mypy and Static Analysis ===
+.mypy_cache/
+.dmypy.json
+
+# === Linter/Formatter ===
+.pyre/
+.pylint.d/
+
+# === Profiler ===
+.prof
+
+# === Security ===
+*.pem
+*.key
+
+# === Misc ===
+*.bak
+*.tmp
+*.out

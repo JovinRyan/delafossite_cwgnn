@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "delafossite_cwgnn"
+version = "0.1.0"
+description = "GNN pipeline for delafossite classification/regression with concept whitening"
+authors = [
+    { name="Jovin Ryan Joseph", email="jovinryanj@tamu.edu" }
+]
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "pandas",
+    "numpy",
+    "torch",
+    "dgl",
+    "pymatgen",
+]
+
+[project.optional-dependencies]
+dev = ["jupyter", "black", "pytest"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[project.scripts]
+run-graph = "delafossite_cwgnn.graph_construction.main:main"
+run-cextraction = "delafossite_cwgnn.concept_extraction.main:main"
