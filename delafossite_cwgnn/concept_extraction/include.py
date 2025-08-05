@@ -1,8 +1,11 @@
 from pymatgen.core import Structure
+import numpy as np
 import warnings
+from collections import Counter
+from mendeleev import element
+from functools import lru_cache
 
-
-def extract_AB_rel_features(structure: Structure, A: str, B: str, C: str, structure_type: str, element_dict: dict):
+def extract_AB_rel_features(structure: Structure, A: str, B: str, C: str, structure_type: str, element_dict: dict)->dict:
     """
     Extracts relative elemental features between A and B elements based on physical properties.
 
@@ -34,11 +37,11 @@ def extract_AB_rel_features(structure: Structure, A: str, B: str, C: str, struct
         warnings.warn(f"Error computing AB_Electronegativity for {A}/{B}: {e}")
         AB_Electronegativity = 0.0
 
-    try:
-        AB_ElectronAffinity = element_dict[A]["ElectronAffinity"] / element_dict[B]["ElectronAffinity"]
-    except (KeyError, ZeroDivisionError) as e:
-        warnings.warn(f"Error computing AB_ElectronAffinity for {A}/{B}: {e}")
-        AB_ElectronAffinity = 0.0
+    # try:
+    #     AB_ElectronAffinity = element_dict[A]["ElectronAffinity"] / element_dict[B]["ElectronAffinity"] # Too many missing/zero datapoints
+    # except (KeyError, ZeroDivisionError) as e:
+    #     warnings.warn(f"Error computing AB_ElectronAffinity for {A}/{B}: {e}")
+    #     AB_ElectronAffinity = 0.0
 
     try:
         AB_IonizationEnergy = element_dict[A]["IonizationEnergy"] / element_dict[B]["IonizationEnergy"]
@@ -49,11 +52,11 @@ def extract_AB_rel_features(structure: Structure, A: str, B: str, C: str, struct
     return {
         "AB_AtomicRadius": AB_AtomicRadius,
         "AB_Electronegativity": AB_Electronegativity,
-        "AB_ElectronAffinity": AB_ElectronAffinity,
+        # "AB_ElectronAffinity": AB_ElectronAffinity,
         "AB_IonizationEnergy": AB_IonizationEnergy
     }
 
-def extract_AB_magnetism(structure: Structure, A: str, B: str, C: str, structure_type: str, element_dict: dict):
+def extract_AB_magnetic_classification(structure: Structure, A: str, B: str, C: str, structure_type: str, element_dict: dict)->dict:
     """
     Returns bool encoded magnetic property indicators for elements A and B.
 
@@ -110,10 +113,38 @@ def extract_AB_magnetism(structure: Structure, A: str, B: str, C: str, structure
         "B_is_DM": int(B in diamagnetic)
     }
 
+metal_categories = {
+    'Alkali metals',
+    'Alkaline earth metals',
+    'Transition metals',
+    'Poor metals',
+    'Metalloids'
+}
+
+@lru_cache(maxsize=None)
+def get_series(symbol: str) -> str:
+    return element(symbol).series
+
+def extract_AB_metal_classification(structure: Structure, A: str, B: str, C: str, structure_type: str, element_dict: dict) -> dict:
+    def classify(symbol: str, prefix: str) -> dict:
+        series = get_series(symbol)
+        return {
+            f"{prefix}_is_alkali": int(series == "Alkali metals"),
+            f"{prefix}_is_alkaline_earth": int(series == "Alkaline earth metals"),
+            f"{prefix}_is_transition": int(series == "Transition metals"),
+            f"{prefix}_is_poor": int(series == "Poor metals"),
+            f"{prefix}_is_metalloid": int(series == "Metalloids")
+        }
+
+    features = {}
+    features.update(classify(A, "A"))
+    features.update(classify(B, "B"))
+    return features
 
 # Master concept function dictionary
 CONCEPT_FUNCTIONS = {
     "AB_rel": extract_AB_rel_features,
-    # add more here
+    "AB_magnetism": extract_AB_magnetic_classification,
+    "AB_metal_category": extract_AB_metal_classification
 }
 

@@ -44,6 +44,7 @@ def main():
 
     # Add and save
     df["FormationE(eV)"] = formation_energies
+    df = df[["Src", "FormationE(eV)"]]
     df.to_csv(output_csv, index=False)
     print(f"Saved formation energies to: {output_csv}")
 

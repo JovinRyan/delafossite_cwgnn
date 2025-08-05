@@ -6,9 +6,9 @@ def get_data_path(filename):
     return os.path.join(os.path.dirname(__file__), '..', 'data', filename)
 
 def parse_Delafossite_POSCAR_entry(POSCAR_file : str) -> dict:
-    structure = Poscar.from_file(POSCAR_file) # File name of the form: A_B_C_T.vasp
+    structure = Poscar.from_file(POSCAR_file).structure # File name of the form: A_B_C_T.vasp
 
-    A, B, C, structure_type = POSCAR_file.split(".")[0].split("_")
+    A, B, C, structure_type = POSCAR_file.split(".")[0].split("/")[-1].split("_")
 
     return {"structure": structure, "A": A, "B": B, "C": C, "structure_type": structure_type}
 
