@@ -17,6 +17,14 @@ dependencies = [
     "torch",
     "dgl",
     "pymatgen",
+    "mendeleev",
+    "tqdm",
+    "scipy",
+    "matminer",
+    "scikit-learn",
+    "torch-geometric",
+    "mp-api",
+    "python-dotenv",
 ]
 
 [project.optional-dependencies]
@@ -28,3 +36,4 @@ where = ["."]
 [project.scripts]
 run-graph = "delafossite_cwgnn.graph_construction.main:main"
 run-cextraction = "delafossite_cwgnn.concept_extraction.main:main"
+run-elemrefE = "delafossite_cwgnn.preprocessing.get_elemental_reference_energies:main"

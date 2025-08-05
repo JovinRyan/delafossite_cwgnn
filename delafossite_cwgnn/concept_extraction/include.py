@@ -58,24 +58,26 @@ def extract_AB_rel_features(structure: Structure, A: str, B: str, C: str, struct
 
 def extract_AB_magnetic_classification(structure: Structure, A: str, B: str, C: str, structure_type: str, element_dict: dict)->dict:
     """
-    Returns bool encoded magnetic property indicators for elements A and B.
+    Encodes magnetic classification of elements A and B into binary features.
 
-    Magnetic properties are classified into:
+    Magnetic classifications include:
         - Ferromagnetic (FM)
         - Antiferromagnetic (AFM)
         - Paramagnetic (PM)
         - Diamagnetic (DM)
 
     Args:
-        structure (Structure): The crystal structure object (not used in this function but kept for consistency).
-        A (str): The chemical symbol for element A.
-        B (str): The chemical symbol for element B.
-        C (str): The chemical symbol for element C (not used here).
-        structure_type (str): The type of structure (not used here).
-        element_dict (dict): A dictionary of element properties (not used here).
+        structure (Structure): Pymatgen structure (not used directly).
+        A (str): Chemical symbol for element A.
+        B (str): Chemical symbol for element B.
+        C (str): Chemical symbol for element C (not used).
+        structure_type (str): Type of structure (not used).
+        element_dict (dict): Dictionary of element properties (not used).
 
     Returns:
-        dict: Bool encoded magnetic property indicators for A and B.
+        dict: Dictionary with binary features:
+            - 'A_is_FM', 'A_is_AFM', 'A_is_PM', 'A_is_DM'
+            - 'B_is_FM', 'B_is_AFM', 'B_is_PM', 'B_is_DM'
     """
 
     # Element classifications by magnetic property
@@ -126,6 +128,23 @@ def get_series(symbol: str) -> str:
     return element(symbol).series
 
 def extract_AB_metal_classification(structure: Structure, A: str, B: str, C: str, structure_type: str, element_dict: dict) -> dict:
+    """
+    Encodes whether elements A and B belong to specific metal categories based on periodic table series.
+
+    Args:
+        structure (Structure): Pymatgen structure (not used directly).
+        A (str): Chemical symbol for element A.
+        B (str): Chemical symbol for element B.
+        C (str): Chemical symbol for element C (not used).
+        structure_type (str): Type of structure (not used).
+        element_dict (dict): Dictionary of element properties.
+
+    Returns:
+        dict: Dictionary with binary features:
+            - 'A_is_alkali', 'A_is_alkaline_earth', 'A_is_transition',
+            'A_is_poor', 'A_is_metalloid'
+            - Same for B, prefixed with 'B_'
+    """
     def classify(symbol: str, prefix: str) -> dict:
         series = get_series(symbol)
         return {
