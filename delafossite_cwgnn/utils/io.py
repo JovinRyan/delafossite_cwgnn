@@ -31,7 +31,7 @@ def parse_Delafossite_POSCAR_entry(POSCAR_file : str) -> dict:
             - "A" (str): Symbol of the A-site element
             - "B" (str): Symbol of the B-site element
             - "C" (str): Symbol of the C-site element
-            - "structure_type" (str): Structure type identifier (e.g., 'ABC')
+            - "structure_type" (str): Structure type identifier
     """
     structure = Poscar.from_file(POSCAR_file).structure # File name of the form: A_B_C_T.vasp
 
