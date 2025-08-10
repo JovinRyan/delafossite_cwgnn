@@ -40,5 +40,5 @@ if __name__ == "__main__":
     print(output)
 
     # Write to file
-    with open("test_log.txt", "w") as f:
+    with open("test_cuda_log.txt", "w") as f:
         f.write(output + "\n")
