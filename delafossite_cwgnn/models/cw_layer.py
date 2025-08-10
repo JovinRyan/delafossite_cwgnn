@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Parameter
-from torch_geometric.nn import TopKPooling
+# from torch_geometric.nn import TopKPooling
 
 from dgl.nn.pytorch import GlobalAttentionPooling
 import dgl
