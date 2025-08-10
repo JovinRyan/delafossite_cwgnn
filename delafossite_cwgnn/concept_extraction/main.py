@@ -13,6 +13,7 @@ from delafossite_cwgnn.graph_construction.include import elemental_CSV_to_nested
 
 import gc
 
+warnings.filterwarnings("ignore", category=FutureWarning, module=".*dgl.backend.pytorch.sparse.*")
 warnings.filterwarnings("ignore", category=BadPoscarWarning)
 
 # Global variables for worker processes

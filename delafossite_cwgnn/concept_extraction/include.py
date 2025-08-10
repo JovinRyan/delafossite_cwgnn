@@ -4,6 +4,9 @@ import warnings
 from collections import Counter
 from mendeleev import element
 from functools import lru_cache
+from pymatgen.analysis.local_env import NearNeighbors
+from pymatgen.analysis.local_env import CrystalNN
+
 
 def extract_AB_rel_features(structure: Structure, A: str, B: str, C: str, structure_type: str, element_dict: dict)->dict:
     """
@@ -160,10 +163,68 @@ def extract_AB_metal_classification(structure: Structure, A: str, B: str, C: str
     features.update(classify(B, "B"))
     return features
 
+def extract_triplet_angles(structure: Structure, A: str, B: str, C: str, structure_type: str, element_dict: dict) -> dict:
+    """
+    Finds the C atom closest to the center of the unit cell, identifies the nearest A and B atoms to it,
+    and calculates the three internal angles of the triangle formed by A, B, and C.
+
+    Args:
+        structure (Structure): Pymatgen structure object.
+        A (str): Chemical symbol for element A.
+        B (str): Chemical symbol for element B.
+        C (str): Chemical symbol for element C.
+        structure_type (str): Type of structure (not used).
+        element_dict (dict): Dictionary of element properties (not used).
+
+    Returns:
+        dict: Dictionary containing:
+            - 'ABC_angle' (float): Angle at vertex B, between A–B–C.
+            - 'BCA_angle' (float): Angle at vertex C, between B–C–A.
+            - 'CAB_angle' (float): Angle at vertex A, between C–A–B.
+    """
+    # --- Step 1: Find C atom closest to center ---
+    center_frac = [0.5, 0.5, 0.5]
+    c_sites = [(i, site) for i, site in enumerate(structure) if site.specie.symbol == C]
+
+    min_dist_c, closest_c_idx, closest_c_site = float("inf"), None, None
+    for idx, site in c_sites:
+        dist = structure.lattice.get_distance_and_image(site.frac_coords, center_frac)[0]
+        if dist < min_dist_c:
+            min_dist_c, closest_c_idx, closest_c_site = dist, idx, site
+
+    # --- Step 2: Nearest A to C ---
+    a_sites = [(i, site) for i, site in enumerate(structure) if site.specie.symbol == A]
+    min_dist_a, closest_a_idx, closest_a_site = float("inf"), None, None
+    for idx, site in a_sites:
+        dist = structure.lattice.get_distance_and_image(site.frac_coords, closest_c_site.frac_coords)[0]
+        if dist < min_dist_a:
+            min_dist_a, closest_a_idx, closest_a_site = dist, idx, site
+
+    # --- Step 3: Nearest B to C ---
+    b_sites = [(i, site) for i, site in enumerate(structure) if site.specie.symbol == B]
+    min_dist_b, closest_b_idx, closest_b_site = float("inf"), None, None
+    for idx, site in b_sites:
+        dist = structure.lattice.get_distance_and_image(site.frac_coords, closest_c_site.frac_coords)[0]
+        if dist < min_dist_b:
+            min_dist_b, closest_b_idx, closest_b_site = dist, idx, site
+
+    # --- Step 4: Compute angles ---
+    angle_ABC = structure.get_angle(closest_a_idx, closest_b_idx, closest_c_idx)
+    angle_BCA = structure.get_angle(closest_b_idx, closest_c_idx, closest_a_idx)
+    angle_CAB = structure.get_angle(closest_c_idx, closest_a_idx, closest_b_idx)
+
+    return {
+        "ABC_angle": angle_ABC,
+        "BCA_angle": angle_BCA,
+        "CAB_angle": angle_CAB
+    }
+
+
 # Master concept function dictionary
 CONCEPT_FUNCTIONS = {
     "AB_rel": extract_AB_rel_features,
     "AB_magnetism": extract_AB_magnetic_classification,
-    "AB_metal_category": extract_AB_metal_classification
+    "AB_metal_category": extract_AB_metal_classification,
+    "triplet_angles": extract_triplet_angles
 }
 
