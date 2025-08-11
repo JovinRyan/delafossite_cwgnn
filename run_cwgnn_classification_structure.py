@@ -217,7 +217,7 @@ def train():
             emb, logits, concept_logits = model(g, feats)
 
             loss_cls = F.cross_entropy(logits, labels)
-            loss_concept = F.binary_cross_entropy_with_logits(concept_logits, concept_labels.float())
+            loss_concept = F.mse_loss(concept_logits, concept_labels.float())
             loss = loss_cls + loss_concept
 
             loss.backward()
@@ -277,3 +277,6 @@ def train():
     print("Training finished.")
     print(f"Best val classification accuracy: {best_val_acc:.4f}")
     print(f"Training metrics saved to {csv_path_metrics}")
+
+if __name__ == "__main__":
+    train()
