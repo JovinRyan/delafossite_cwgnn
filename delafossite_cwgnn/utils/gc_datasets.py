@@ -44,6 +44,9 @@ class BaseGraphConceptDataset(Dataset):
         self.concept_columns = self.data.columns[concept_start_idx:]
         self.concepts = self.data[self.concept_columns].values.astype(float)
 
+        # Save concept column names as a list of strings
+        self.concept_column_names = list(self.concept_columns)
+
     def __len__(self):
         return len(self.structure_ids)
 
@@ -80,8 +83,11 @@ class GraphConceptRegressionDataset(BaseGraphConceptDataset):
     def __init__(self, csv_path, graph_dir, concept_start_idx=3, target_col=None):
         super().__init__(csv_path, graph_dir, concept_start_idx)
         if target_col is None:
-            target_col = self.data.columns[1]  # default = second column
+            target_col = self.data.columns[1]
         self.targets = self.data[target_col].astype(float).tolist()
+
+        # Save target column name
+        self.target_column_name = target_col
 
     def __getitem__(self, idx):
         """
@@ -117,8 +123,11 @@ class GraphConceptClassificationDataset(BaseGraphConceptDataset):
     def __init__(self, csv_path, graph_dir, concept_start_idx=3, target_col=None):
         super().__init__(csv_path, graph_dir, concept_start_idx)
         if target_col is None:
-            target_col = self.data.columns[1]  # default = second column
+            target_col = self.data.columns[1]
         self.targets = self.data[target_col].astype(int).tolist()
+
+        # Save target column name
+        self.target_column_name = target_col
 
     def __getitem__(self, idx):
         """

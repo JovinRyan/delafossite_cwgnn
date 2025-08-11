@@ -53,6 +53,18 @@ def test_datasets():
                 target_col="sum_J"
             )
             lines.append(f"Regression dataset length: {len(reg_ds)}")
+
+            # Check target column name attribute
+            assert hasattr(reg_ds, 'target_column_name'), "Regression dataset missing target_column_name attribute"
+            assert reg_ds.target_column_name == "sum_J", f"Expected target_column_name 'sum_J', got {reg_ds.target_column_name}"
+            lines.append(f"Regression target column name: {reg_ds.target_column_name}")
+
+            # Check concept column names
+            expected_concepts = [f"concept_{i}" for i in range(5)]
+            assert hasattr(reg_ds, 'concept_column_names'), "Regression dataset missing concept_column_names attribute"
+            assert reg_ds.concept_column_names == expected_concepts, f"Expected concept_column_names {expected_concepts}, got {reg_ds.concept_column_names}"
+            lines.append(f"Regression concept column names: {reg_ds.concept_column_names}")
+
             g, y, c = reg_ds[0]
             lines.append(f"Regression sample graph nodes: {g.num_nodes()}, target: {y.item()}, concepts shape: {c.shape}")
 
@@ -64,6 +76,17 @@ def test_datasets():
                 target_col="mag_class_encoded"
             )
             lines.append(f"Classification dataset length: {len(cls_ds)}")
+
+            # Check target column name attribute
+            assert hasattr(cls_ds, 'target_column_name'), "Classification dataset missing target_column_name attribute"
+            assert cls_ds.target_column_name == "mag_class_encoded", f"Expected target_column_name 'mag_class_encoded', got {cls_ds.target_column_name}"
+            lines.append(f"Classification target column name: {cls_ds.target_column_name}")
+
+            # Check concept column names
+            assert hasattr(cls_ds, 'concept_column_names'), "Classification dataset missing concept_column_names attribute"
+            assert cls_ds.concept_column_names == expected_concepts, f"Expected concept_column_names {expected_concepts}, got {cls_ds.concept_column_names}"
+            lines.append(f"Classification concept column names: {cls_ds.concept_column_names}")
+
             lines.append(f"Classification num classes: {cls_ds.num_classes}")
             g, y, c = cls_ds[0]
             lines.append(f"Classification sample label: {y.item()}, concepts shape: {c.shape}")
