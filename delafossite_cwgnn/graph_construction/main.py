@@ -34,7 +34,7 @@ def main(argv=None):
 
     if len(argv) > 1:
         directory_path = argv[1]
-        csv_filename = "HighThroughput_TM_with_J.csv"
+        csv_filename = "target_structure_type_concepts_triplet_angles.csv"
         csv_path = os.path.join(directory_path, csv_filename)
         graph_save_dir = os.path.join(directory_path, "dgl_graphs")
 

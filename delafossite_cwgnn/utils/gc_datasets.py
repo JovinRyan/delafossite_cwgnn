@@ -30,10 +30,10 @@ class BaseGraphConceptDataset(Dataset):
         Path to CSV file.
     graph_dir : str
         Directory containing .bin graph files.
-    concept_start_idx : int, default=3
+    concept_start_idx : int, default=2
         Index (0-based) of the first concept column.
     """
-    def __init__(self, csv_path, graph_dir, concept_start_idx=3):
+    def __init__(self, csv_path, graph_dir, concept_start_idx=2):
         self.data = pd.read_csv(csv_path)
         self.graph_dir = graph_dir
 
@@ -75,12 +75,12 @@ class GraphConceptRegressionDataset(BaseGraphConceptDataset):
         Path to CSV file containing structure IDs, targets, and concepts.
     graph_dir : str
         Directory containing .bin graph files.
-    concept_start_idx : int, default=3
+    concept_start_idx : int, default=2
         Index of first concept column.
     target_col : str or None, default=None
         Column name for target values. If None, uses second column in CSV.
     """
-    def __init__(self, csv_path, graph_dir, concept_start_idx=3, target_col=None):
+    def __init__(self, csv_path, graph_dir, concept_start_idx=2, target_col=None):
         super().__init__(csv_path, graph_dir, concept_start_idx)
         if target_col is None:
             target_col = self.data.columns[1]
@@ -115,18 +115,22 @@ class GraphConceptClassificationDataset(BaseGraphConceptDataset):
         Path to CSV file containing structure IDs, targets, and concepts.
     graph_dir : str
         Directory containing .bin graph files.
-    concept_start_idx : int, default=3
+    concept_start_idx : int, default=2
         Index of first concept column.
     target_col : str or None, default=None
         Column name for target labels. If None, uses second column in CSV.
     """
-    def __init__(self, csv_path, graph_dir, concept_start_idx=3, target_col=None):
+    def __init__(self, csv_path, graph_dir, concept_start_idx=2, target_col=None):
         super().__init__(csv_path, graph_dir, concept_start_idx)
         if target_col is None:
             target_col = self.data.columns[1]
-        self.targets = self.data[target_col].astype(int).tolist()
 
-        # Save target column name
+        # Convert target column to categorical codes if not numeric
+        if pd.api.types.is_numeric_dtype(self.data[target_col]):
+            self.targets = self.data[target_col].astype(int).tolist()
+        else:
+            self.targets = pd.Categorical(self.data[target_col]).codes.tolist()
+
         self.target_column_name = target_col
 
     def __getitem__(self, idx):

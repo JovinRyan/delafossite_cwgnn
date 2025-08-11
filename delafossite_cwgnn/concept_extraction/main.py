@@ -82,7 +82,7 @@ def main():
     element_dict = elemental_CSV_to_nested_dict()
 
     # Read structure names and target column
-    csv_path = os.path.join(base_dir, "HighThroughput_TM_with_J.csv")
+    csv_path = os.path.join(base_dir, "delafossite_structure_type.csv")
     df = pd.read_csv(csv_path)
     structure_names = df.iloc[:, 0].tolist()
 
