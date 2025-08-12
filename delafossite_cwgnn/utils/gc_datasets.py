@@ -3,6 +3,7 @@ import torch
 import pandas as pd
 import dgl
 from torch.utils.data import Dataset
+from sklearn.preprocessing import StandardScaler
 
 class BaseGraphConceptDataset(Dataset):
     """
@@ -33,7 +34,7 @@ class BaseGraphConceptDataset(Dataset):
     concept_start_idx : int, default=2
         Index (0-based) of the first concept column.
     """
-    def __init__(self, csv_path, graph_dir, concept_start_idx=2):
+    def __init__(self, csv_path, graph_dir, concept_start_idx=2, scaler=None, is_training=False):
         self.data = pd.read_csv(csv_path)
         self.graph_dir = graph_dir
 
@@ -46,6 +47,19 @@ class BaseGraphConceptDataset(Dataset):
 
         # Save concept column names as a list of strings
         self.concept_column_names = list(self.concept_columns)
+
+        self.concepts = self.data[self.concept_columns].values.astype(float)
+
+        # Handle scaling
+        if scaler is None and is_training:
+            self.scaler = StandardScaler()
+            self.scaler.fit(self.concepts)
+            self.concepts = self.scaler.transform(self.concepts)
+        elif scaler is not None:
+            self.scaler = scaler
+            self.concepts = self.scaler.transform(self.concepts)
+        else:
+            self.scaler = None  # no scaling
 
     def __len__(self):
         return len(self.structure_ids)
@@ -80,13 +94,11 @@ class GraphConceptRegressionDataset(BaseGraphConceptDataset):
     target_col : str or None, default=None
         Column name for target values. If None, uses second column in CSV.
     """
-    def __init__(self, csv_path, graph_dir, concept_start_idx=2, target_col=None):
-        super().__init__(csv_path, graph_dir, concept_start_idx)
+    def __init__(self, csv_path, graph_dir, concept_start_idx=2, target_col=None, scaler=None, is_training=False):
+        super().__init__(csv_path, graph_dir, concept_start_idx, scaler=scaler, is_training=is_training)
         if target_col is None:
             target_col = self.data.columns[1]
         self.targets = self.data[target_col].astype(float).tolist()
-
-        # Save target column name
         self.target_column_name = target_col
 
     def __getitem__(self, idx):
@@ -120,12 +132,12 @@ class GraphConceptClassificationDataset(BaseGraphConceptDataset):
     target_col : str or None, default=None
         Column name for target labels. If None, uses second column in CSV.
     """
-    def __init__(self, csv_path, graph_dir, concept_start_idx=2, target_col=None):
-        super().__init__(csv_path, graph_dir, concept_start_idx)
+
+    def __init__(self, csv_path, graph_dir, concept_start_idx=2, target_col=None, scaler=None, is_training=False):
+        super().__init__(csv_path, graph_dir, concept_start_idx, scaler=scaler, is_training=is_training)
         if target_col is None:
             target_col = self.data.columns[1]
 
-        # Convert target column to categorical codes if not numeric
         if pd.api.types.is_numeric_dtype(self.data[target_col]):
             self.targets = self.data[target_col].astype(int).tolist()
         else:
