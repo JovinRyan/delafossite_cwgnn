@@ -1,24 +1,12 @@
 """
-Adapted Code from:
-- Paper: Explainable AI in drug discovery: self-interpretable graph neural network for molecular property prediction using concept whitening. Mach Learn 113, 2013–2044 (2024)
-- Code: https://github.com/KRLGroup/GraphCW
-
-Original Code from:
+Code adapted from:
 - Paper: Concept Whitening for Interpretable Image Recognition, Nature Machine Intelligence 2, 772–782 (2020).
 - Code: https://github.com/zhiCHEN96/ConceptWhitening
-
-Changes made by Author Jovin Ryan Joseph:
-- DeepGraphLibrary (DGL) support
-- TopKPooling -> GlobalAttentionPooling
 """
-import torch
-import torch.nn as nn
+import torch.nn
 import torch.nn.functional as F
 from torch.nn import Parameter
-# from torch_geometric.nn import TopKPooling
 
-from dgl.nn.pytorch import GlobalAttentionPooling
-import dgl
 # import extension._bcnn as bcnn
 
 __all__ = ['iterative_normalization', 'IterNorm']
@@ -45,7 +33,7 @@ class iterative_normalization_py(torch.autograd.Function):
         P[0] = torch.eye(d).to(X).expand(ctx.g, d, d) # [1, 128, 128] = [1, latent_dim, latent_dim]
 
         # xc.transpose(1, 2).size() = [1, *, 128] = [1, #nodes, latent_dim]
-        Sigma = torch.baddbmm(P[0], xc, xc.transpose(1, 2), beta=eps, alpha=1. / m) # In the paper: 1/n *(Z-mu*1^T)(Z-mu*1^T)^T ## Updated to remove deprecation warning
+        Sigma = torch.baddbmm(eps, P[0], 1. / m, xc, xc.transpose(1, 2)) # In the paper: 1/n *(Z-mu*1^T)(Z-mu*1^T)^T
         # Sigma.size() = [1, 128, 128] = [1, latent_dim, latent_dim]
         # Reciprocal of trace of Sigma: shape [g, 1, 1]
         rTr = (Sigma * P[0]).sum((1, 2), keepdim=True).reciprocal_() # [1, 1, 1]
@@ -71,7 +59,7 @@ class iterative_normalization_py(torch.autograd.Function):
             xc = x - running_mean
             wm = running_wmat
 
-        xn = wm.matmul(xc) # [1, 128, *] = [1, latent_dim, #nodes] ## whitening step
+        xn = wm.matmul(xc) # [1, 128, *] = [1, latent_dim, #nodes]
         Xn = xn.view(X.size(1), X.size(0), *X.size()[2:]).transpose(0, 1).contiguous() # [779, 128] = [#nodes, latent_dim]
         ctx.save_for_backward(*saved)
         return Xn
@@ -178,7 +166,7 @@ class IterNormRotation(torch.nn.Module):
 
     """
     def __init__(self, num_features, num_groups = 1, num_channels=None, T=5, dim=4, eps=1e-5, momentum=0.2, affine=False,
-                mode = -1, activation_mode='weighted_topk_pool', *args, **kwargs): # prima era activation_mode='pool_max'
+                mode = -1, activation_mode='mean', *args, **kwargs): # prima era activation_mode='pool_max'
         super(IterNormRotation, self).__init__()
         assert dim == 4, 'IterNormRotation does not support 2D'
         self.T = T
@@ -209,8 +197,7 @@ class IterNormRotation(torch.nn.Module):
         shape[1] = self.num_features
         self.weight = Parameter(torch.Tensor(*shape))
         self.bias = Parameter(torch.Tensor(*shape))
-        self.att_pool = GlobalAttentionPooling(gate_nn=nn.Sequential(nn.Linear(self.num_channels, 1),nn.Sigmoid())) # Changed self.topkpool -> self.att_pool
-                                                                                                                    # Necessary for dgl compatibility
+
         # running mean
         self.register_buffer('running_mean', torch.zeros(num_groups, num_channels, 1))
         # running whiten matrix
@@ -228,7 +215,6 @@ class IterNormRotation(torch.nn.Module):
         if self.affine:
             torch.nn.init.ones_(self.weight)
             torch.nn.init.zeros_(self.bias)
-
 
     # After whitening the latent space, we need to rotate the latent space to align concepts with axes.
     # We need to find an orthogonal matrix Q by solving an optimization problem with an orthogonality constraint.
@@ -288,118 +274,51 @@ class IterNormRotation(torch.nn.Module):
             self.counter = (torch.ones(size_R[-1]) * 0.001).cuda()
 
 
-    def forward(self, X: torch.Tensor, g: dgl.DGLGraph, batch=None):
-        """
-        Args:
-            X: Node feature tensor of shape [num_nodes, num_features]
-            g: Batched DGLGraph containing one or more graphs
+    def forward(self, X: torch.Tensor, edge_index, batch):
+        #print('INSIDE ITER NORM ROTATION')
+        #print(f'Input IterNormRotation: {X.shape}') # [788, 128] = [#nodes, latent_dim]
 
-        Returns:
-            Whitened node features tensor, optionally affine transformed.
-        """
+        X_hat = iterative_normalization_py.apply(X, self.running_mean, self.running_wm, self.num_channels, self.T,
+                                                 self.eps, self.momentum, self.training)
 
+        # nchw --> nc
+        size_X = X_hat.size()
+        #print(size_X) # [788, 128] = [#nodes, latent_dim]
+        size_R = self.running_rot.size()
+        #print(size_R) # [1, 128, 128]
+        # ngchw --> ngc
+        X_hat = X_hat.view(size_X[0], size_R[0], size_R[2], *size_X[2:]) # [805, 1, 128] = [#nodes, 1, latent_dim]
 
-        # Step 1: Iterative normalization (approximate whitening)
-        # X_hat = iterative_normalization_py(X)
-        # This function normalizes X to have zero mean and identity covariance approximately.
-        X_hat = iterative_normalization_py.apply(
-            X, self.running_mean, self.running_wm, self.num_channels,
-            self.T, self.eps, self.momentum, self.training
-        )
-
-        size_X = X_hat.size()  # (N, C), where N = total nodes, C = features
-        size_R = self.running_rot.size()  # (1, C, C), rotation matrix dimension
-
-        # Reshape X_hat to (N, 1, C) to align for batch matrix multiplication later
-        X_hat = X_hat.view(size_X[0], size_R[0], size_R[2], *size_X[2:])  # [N, 1, C]
-
-        # --- Extract batch information ---
-        # We need to know which nodes belong to which graph in the batch
-        batch_list = []
-        for i, num_nodes in enumerate(g.batch_num_nodes()):
-            batch_list.extend([i] * num_nodes)
-        batch = torch.tensor(batch_list, device=X.device)  # shape: [N]
-
-        # Step 2: Accumulate gradients for whitening rotation update using activations
+        # updating the gradient matrix, using the concept dataset
+        # the gradient is accumulated with momentum to stablize the training
         with torch.no_grad():
-            if self.mode >= 0:
-                # Activation mode: mean pooling per graph
-                if self.activation_mode == 'mean':
-                    # Calculate mean of features per graph:
-                    # For graph i with nodes N_i, mean activation:
-                    # μ_i = (1 / |N_i|) ∑_{n∈N_i} X_hat[n]
-                    graph_means = torch.zeros((len(g.batch_num_nodes()), X_hat.size(-1)), device=X.device)
-                    for graph_idx in range(len(g.batch_num_nodes())):
-                        nodes_mask = (batch == graph_idx)
-                        graph_means[graph_idx] = X_hat[nodes_mask].mean(dim=0).squeeze(0)
-                    # Average over graphs:
-                    # μ = (1 / M) ∑_{i=1}^M μ_i
-                    mean_over_graphs = graph_means.mean(dim=0)
-                    # Update accumulated gradient matrix G with momentum:
-                    # G_j = momentum * (-μ) + (1 - momentum) * G_j_prev
-                    self.sum_G[:, self.mode, :] = self.momentum * -mean_over_graphs + (1. - self.momentum) * self.sum_G[:, self.mode, :]
+            # When 0<=mode, the jth column of gradient matrix is accumulated
+            if self.mode>=0:
+                if self.activation_mode=='mean':
+                    self.sum_G[:,self.mode,:] = self.momentum * -X_hat.mean((0)) + (1. - self.momentum) * self.sum_G[:,self.mode,:]
+                    self.counter[self.mode] += 1
+                elif self.activation_mode=='max':
+                    X_test = torch.einsum('bgc,gdc->bgd', X_hat, self.running_rot)
+                    max_values = torch.max(X_test, 2, keepdim=True)[0]
+                    max_bool = max_values==X_test
+                    grad = -((X_hat * max_bool.to(X_hat))/(max_bool.to(X_hat)+1e-5)).mean((0,))
+                    self.sum_G[:,self.mode,:] = self.momentum * grad + (1. - self.momentum) * self.sum_G[:,self.mode,:]
+                    self.counter[self.mode] += 1
+                elif self.activation_mode=='pos_mean':
+                    X_test = torch.einsum('bgc,gdc->bgd', X_hat, self.running_rot)
+                    pos_bool = X_test > 0
+                    grad = -((X_hat * pos_bool.to(X_hat))/(pos_bool.to(X_hat)+1e-5)).mean((0,))
+                    self.sum_G[:,self.mode,:] = self.momentum * grad + (1. - self.momentum) * self.sum_G[:,self.mode,:]
                     self.counter[self.mode] += 1
 
-                # Activation mode: max pooling per graph
-                elif self.activation_mode == 'max':
-                    # For graph i, max activation:
-                    # m_i = max_{n∈N_i} X_hat[n]
-                    graph_maxs = torch.zeros((len(g.batch_num_nodes()), X_hat.size(-1)), device=X.device)
-                    for graph_idx in range(len(g.batch_num_nodes())):
-                        nodes_mask = (batch == graph_idx)
-                        graph_maxs[graph_idx], _ = X_hat[nodes_mask].max(dim=0)
-                    # Average max over graphs:
-                    max_over_graphs = graph_maxs.mean(dim=0)
-                    # Gradient update similar to mean mode
-                    self.sum_G[:, self.mode, :] = self.momentum * -max_over_graphs + (1. - self.momentum) * self.sum_G[:, self.mode, :]
-                    self.counter[self.mode] += 1
+        X_hat = torch.einsum('bgc,gdc->bgd', X_hat, self.running_rot)
+        X_hat = X_hat.view(*size_X) # [*, 128] = [#nodes, latent_dim]
 
-                # Activation mode: positive mean pooling per graph
-                elif self.activation_mode == 'pos_mean':
-                    # Positive mask: select activations > 0
-                    graph_pos_means = torch.zeros((len(g.batch_num_nodes()), X_hat.size(-1)), device=X.device)
-                    for graph_idx in range(len(g.batch_num_nodes())):
-                        nodes_mask = (batch == graph_idx)
-                        pos_mask = X_hat[nodes_mask] > 0
-                        masked = X_hat[nodes_mask] * pos_mask.to(X_hat.dtype)
-                        graph_pos_means[graph_idx] = masked.mean(dim=0).squeeze(0)
-                    pos_mean_over_graphs = graph_pos_means.mean(dim=0)
-                    self.sum_G[:, self.mode, :] = self.momentum * -pos_mean_over_graphs + (1. - self.momentum) * self.sum_G[:, self.mode, :]
-                    self.counter[self.mode] += 1
-
-                # Activation mode: top-k or weighted top-k pooling replaced by attention pooling
-                elif self.activation_mode in ['topk_pool', 'weighted_topk_pool']:
-                    # Keep X_hat shape as [N, C]
-                    X_hat = X_hat.view(size_X[0], size_X[1])  # [N, C]
-
-                    rot_mat = self.running_rot.squeeze(0)  # [C, C]
-                    X_test_nchw = torch.matmul(X_hat, rot_mat)  # [N, C]
-
-                    attn_scores = self.att_pool.gate_nn(X_test_nchw)  # [N, 1]
-                    attn_weights = torch.sigmoid(attn_scores)        # [N, 1]
-
-                    pooled_weights = torch.zeros_like(attn_weights)
-
-                    for graph_idx in range(len(g.batch_num_nodes())):
-                        nodes_mask = (batch == graph_idx)
-                        graph_weights = attn_weights[nodes_mask]  # [num_nodes_in_graph, 1]
-                        norm_weights = graph_weights / (graph_weights.sum() + 1e-10)
-                        pooled_weights[nodes_mask] = norm_weights
-
-                    pooled_weights_expanded = pooled_weights.expand(-1, X_hat.size(1))  # [N, C]
-
-                    grad = -(pooled_weights_expanded * X_hat).mean(dim=0)  # [C]
-                    self.sum_G[:, self.mode, :] = self.momentum * grad + (1. - self.momentum) * self.sum_G[:, self.mode, :]
-                    self.counter[self.mode] += 1
-
-        # Step 3: Apply whitening rotation matrix to normalized features:
-        # X_rot = X_hat × running_rot
-        X_hat = X_hat.unsqueeze(1)  # shape: [N, 1, C]
-        X_rot = torch.einsum('bgc,gdc->bgd', X_hat, self.running_rot)
-        X_rot = X_rot.squeeze(1)  # shape: [N, C]
-        # Step 4: Optional affine transformation
-        # Y = X_rot * weight + bias if affine enabled
         if self.affine:
             return X_hat * self.weight + self.bias
         else:
             return X_hat
+
+    def extra_repr(self):
+        return '{num_features}, num_channels={num_channels}, T={T}, eps={eps}, ' \
+               'momentum={momentum}, affine={affine}'.format(**self.__dict__)
