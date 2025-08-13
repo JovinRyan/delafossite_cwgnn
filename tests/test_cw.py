@@ -4,7 +4,7 @@ import dgl
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from delafossite_cwgnn.models.cw_layer import IterNormRotation  # your original import
+from delafossite_cwgnn.models.iter_norm import IterNormRotation  # your original import
 
 LOG_FILE = Path("test_cw_log.txt")
 
@@ -30,7 +30,7 @@ def test_shape_and_whitening(device):
 
     cw = IterNormRotation(num_features=feat_dim, dim=4, activation_mode="mean", mode=0)
     cw = cw.to(device)
-    out = cw(X, g)
+    out = cw(X, None, None)  # <-- fixed here
 
     log(f"Input shape: {X.shape}, Output shape: {out.shape}")
     assert out.shape == X.shape, "Output shape mismatch"
@@ -76,7 +76,7 @@ def test_activation_modes(device):
         cw = IterNormRotation(num_features=feat_dim, dim=4, activation_mode=act_mode, mode=0)
         cw = cw.to(device)
         try:
-            out = cw(X, g)
+            out = cw(X, None, None)  # <-- fixed here
             log(f"  Success. Output mean={out.mean().item():.4f}, std={out.std().item():.4f}")
         except Exception as e:
             log(f"  FAILED with error: {e}")

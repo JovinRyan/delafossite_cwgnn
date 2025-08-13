@@ -2,8 +2,10 @@ import os
 import torch
 import pandas as pd
 import dgl
+import numpy as np
 from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader, Subset
 
 class BaseGraphConceptDataset(Dataset):
     """
@@ -191,3 +193,61 @@ def collate_fn(batch):
     labels = torch.stack(labels)  # keeps dtype from dataset
     concepts = torch.stack(concepts)
     return batched_graph, labels, concepts
+
+def create_graph_dataloaders(dataset_cls, csv_path, graph_dir,
+                             batch_size=32, concept_start_idx=2,
+                             target_col=None, scaler=None,
+                             train_frac=0.7, val_frac=0.15, test_frac=None,
+                             collate_fn=None, shuffle=True, random_seed=42):
+    """
+    Create train, val, test DataLoaders for your GraphConceptDataset objects.
+    """
+    np.random.seed(random_seed)
+
+    # Step 1: Load full dataset WITHOUT scaling
+    full_dataset = dataset_cls(csv_path, graph_dir,
+                               concept_start_idx=concept_start_idx,
+                               target_col=target_col, scaler=None,
+                               is_training=False)
+
+    n = len(full_dataset)
+    if test_frac is None:
+        test_frac = 1.0 - train_frac - val_frac
+    assert train_frac + val_frac + test_frac <= 1.0 + 1e-6, "Fractions must sum <= 1"
+
+    # Step 2: Shuffle indices
+    indices = np.arange(n)
+    if shuffle:
+        np.random.shuffle(indices)
+
+    n_train = int(n * train_frac)
+    n_val = int(n * val_frac)
+    n_test = n - n_train - n_val
+
+    train_idx = indices[:n_train]
+    val_idx = indices[n_train:n_train + n_val]
+    test_idx = indices[n_train + n_val:]
+
+    # Step 3: Fit scaler on training concepts if not provided
+    if scaler is None:
+        train_concepts = full_dataset.concepts[train_idx]
+        scaler = StandardScaler()
+        scaler.fit(train_concepts)
+
+    # Step 4: Recreate dataset with scaler applied
+    scaled_dataset = dataset_cls(csv_path, graph_dir,
+                                 concept_start_idx=concept_start_idx,
+                                 target_col=target_col, scaler=scaler,
+                                 is_training=False)
+
+    # Step 5: Create subsets
+    train_ds = Subset(scaled_dataset, train_idx)
+    val_ds = Subset(scaled_dataset, val_idx)
+    test_ds = Subset(scaled_dataset, test_idx)
+
+    # Step 6: Create DataLoaders
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+
+    return train_loader, val_loader, test_loader, scaled_dataset, scaler
