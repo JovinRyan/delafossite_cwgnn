@@ -1,105 +1,114 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import dgl
-from delafossite_cwgnn.models.iter_norm import IterNormRotation as cw_layer
+def train_model(
+    model,
+    train_loader,
+    val_loader,
+    test_loader,
+    device,
+    optimizer,
+    scheduler=None,
+    num_epochs=50,
+    patience=5,
+    save_path="checkpoints/best_model.pth",
+    concepts_are_continuous=True,
+    early_stopping=True,
+    concept_loss_weight=1.0,   # single scalar
+    cls_loss_weight=1.0
+):
+    model = model.to(device)
+    best_val_acc = 0.0
+    epochs_no_improve = 0
+    metrics = []
 
-# ---------------- Edge-aware Graph Convolution Layer ----------------
-class EGConv(nn.Module):
-    """
-    Edge-GCN layer that uses node features and edge features to compute messages.
-    """
-    def __init__(self, in_node_feats, in_edge_feats, out_feats):
-        super().__init__()
-        # MLP for edge-aware message
-        self.mlp = nn.Sequential(
-            nn.Linear(2 * in_node_feats + in_edge_feats, out_feats),
-            nn.ReLU(),
-            nn.Linear(out_feats, out_feats)
-        )
+    uses_cw = hasattr(model, "change_mode") and hasattr(model, "update_rotation_matrix")
+    num_concepts = model.concept_head.out_features if hasattr(model, "concept_head") else 0
 
-    def forward(self, g, node_feats, edge_feats):
-        with g.local_scope():
-            g.ndata['h'] = node_feats
-            g.edata['e'] = edge_feats
-            # Compute edge messages
-            g.apply_edges(lambda edges: {
-                'm': self.mlp(torch.cat([edges.src['h'], edges.dst['h'], edges.data['e']], dim=1))
-            })
-            # Aggregate messages to nodes
-            g.update_all(dgl.function.copy_e('m', 'm'), dgl.function.sum('m', 'h_new'))
-            return g.ndata['h_new']
+    for epoch in range(1, num_epochs + 1):
+        model.train()
+        total_cls_loss = 0.0
+        total_concept_loss = 0.0
+        total_correct = 0
+        total_samples_cls = 0
 
+        concept_indices = range(num_concepts) if uses_cw else [None]
 
-# ---------------- Graph Pooling ----------------
-def mean_pooling(node_feats, batch):
-    batch_size = batch.max().item() + 1
-    graph_emb = torch.zeros(batch_size, node_feats.size(1), device=node_feats.device)
-    count = torch.zeros(batch_size, device=node_feats.device)
-    graph_emb = graph_emb.index_add_(0, batch, node_feats)
-    count = count.index_add_(0, batch, torch.ones_like(batch, dtype=node_feats.dtype))
-    graph_emb = graph_emb / count.unsqueeze(1)
-    return graph_emb
+        for concept_idx in concept_indices:
+            if uses_cw:
+                model.change_mode(concept_idx)
 
+            for g, labels, concept_labels in train_loader:
+                g, labels, concept_labels = g.to(device), labels.to(device), concept_labels.to(device)
 
-# ---------------- Edge-GCN for Classification with CW ----------------
-class EGNN_Classification(nn.Module):
-    def __init__(self, layer_dims, num_classes, num_concepts, edge_feats_dim=1,
-                 dropout=0.2, use_cw=True, pooling="mean"):
-        super().__init__()
-        self.use_cw = use_cw
-        self.pooling = pooling
-        self.dropout_layer = nn.Dropout(dropout)
+                optimizer.zero_grad()
+                _, logits, concept_logits = model(g, g.ndata['feat'].to(device))
 
-        # EGConv layers + batchnorm
-        self.gcn_layers = nn.ModuleList()
-        self.norm_layers = nn.ModuleList()
-        for in_f, out_f in layer_dims:
-            self.gcn_layers.append(EGConv(in_f, edge_feats_dim, out_f))
-            self.norm_layers.append(nn.BatchNorm1d(out_f))
+                loss = 0.0
 
-        # Final normalization / CW layer
-        if use_cw:
-            self.cw_layer = cw_layer(num_features=layer_dims[-1][1], dim=4, activation_mode="mean", mode=-1)
+                if concept_idx is not None:
+                    loss_concept = F.mse_loss(concept_logits[:, concept_idx],
+                                              concept_labels[:, concept_idx].float())
+                    loss += loss_concept * concept_loss_weight
+                    total_concept_loss += loss_concept.item() * labels.size(0)
+
+                if (concept_idx is None) or (concept_idx == 0):
+                    loss_cls = F.cross_entropy(logits, labels) * cls_loss_weight
+                    loss += loss_cls
+                    total_cls_loss += loss_cls.item() * labels.size(0)
+                    preds = logits.argmax(dim=1)
+                    total_correct += (preds == labels).sum().item()
+                    total_samples_cls += labels.size(0)
+
+                loss.backward()
+                optimizer.step()
+
+            if uses_cw:
+                model.update_rotation_matrix()
+
+        if uses_cw:
+            model.change_mode(-1)
+
+        # Compute averages
+        train_cls_loss = total_cls_loss / max(1, total_samples_cls)
+        train_concept_loss = total_concept_loss / max(1, len(train_loader.dataset))
+        train_acc = total_correct / max(1, total_samples_cls)
+
+        # Evaluate
+        val_cls_acc, val_concept_metrics = evaluate(model, val_loader, device, concepts_are_continuous)
+        test_cls_acc, test_concept_metrics = evaluate(model, test_loader, device, concepts_are_continuous)
+
+        if scheduler is not None:
+            scheduler.step(val_cls_acc)
+
+        print(f"Epoch {epoch:02d} | Train CLS Loss: {train_cls_loss:.4f} "
+              f"CONCEPT Loss: {train_concept_loss:.4f} Acc: {train_acc:.4f}")
+        print(f"          Val CLS Acc: {val_cls_acc:.4f} CONCEPT Metric: {val_concept_metrics}")
+        print(f"          Test CLS Acc: {test_cls_acc:.4f} CONCEPT Metric: {test_concept_metrics}")
+        print(f"          Concept Loss Weight: {concept_loss_weight}")
+        print(f"          LR: {optimizer.param_groups[0]['lr']:.6f}")
+
+        metrics.append({
+            'epoch': epoch,
+            'train_cls_loss': train_cls_loss,
+            'train_concept_loss': train_concept_loss,
+            'train_acc': train_acc,
+            'val_cls_acc': val_cls_acc,
+            'val_concept_metrics': val_concept_metrics,
+            'test_cls_acc': test_cls_acc,
+            'test_concept_metrics': test_concept_metrics,
+        })
+
+        # Early stopping
+        if val_cls_acc > best_val_acc:
+            best_val_acc = val_cls_acc
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            torch.save(model.state_dict(), save_path)
+            epochs_no_improve = 0
+            print(f"Saved best model at epoch {epoch}")
         else:
-            self.bn_norm = nn.BatchNorm1d(layer_dims[-1][1])
+            epochs_no_improve += 1
+            if early_stopping and epochs_no_improve >= patience:
+                print(f"Early stopping at epoch {epoch} — no improvement in {patience} epochs.")
+                break
 
-        # Output heads
-        self.classifier = nn.Linear(layer_dims[-1][1], num_classes)
-        self.concept_head = nn.Linear(layer_dims[-1][1], num_concepts)
-
-    def forward(self, g, x):
-        edge_feats = g.edata['length']
-
-        # EGConv layers
-        for gcn, norm in zip(self.gcn_layers, self.norm_layers):
-            x = gcn(g, x, edge_feats)
-            x = norm(x)
-            x = F.relu(x)
-            x = self.dropout_layer(x)
-
-        # CW or batchnorm
-        if self.use_cw:
-            x = self.cw_layer(x, g, None)
-
-        # Pool graph
-        batch_num_nodes = g.batch_num_nodes()
-        batch = torch.cat([torch.full((n,), i, dtype=torch.long, device=x.device)
-                           for i, n in enumerate(batch_num_nodes)])
-        graph_emb = mean_pooling(x, batch)
-
-        if not self.use_cw:
-            graph_emb = self.bn_norm(graph_emb)
-
-        logits = self.classifier(graph_emb)
-        concept_logits = self.concept_head(graph_emb)
-        return x, logits, concept_logits
-
-    # ---------------- CW helpers ----------------
-    def change_mode(self, mode):
-        if self.use_cw:
-            self.cw_layer.mode = mode
-
-    def update_rotation_matrix(self):
-        if self.use_cw:
-            self.cw_layer.update_rotation_matrix()
+    print("Training finished.")
+    print(f"Best val classification accuracy: {best_val_acc:.4f}")
+    return metrics
