@@ -238,85 +238,76 @@ def collate_fn(batch):
     concepts = torch.stack(concepts)
     return batched_graph, labels, concepts
 
+
+import copy
+import torch
+import numpy as np
+from torch.utils.data import DataLoader, random_split
+from sklearn.preprocessing import StandardScaler
+
 def create_graph_dataloaders(
     dataset_class,
-    dataset_path,
-    batch_size=32,
-    concept_noise_std=0.0,   # Gaussian noise for continuous concepts
-    label_corruption_prob=0.0,  # Probability of random label change
-    train_ratio=0.8,
-    val_ratio=0.1,
-    test_ratio=0.1,
-    seed=42
+    csv_path,
+    graph_dir,
+    batch_size,
+    collate_fn,
+    train_frac=0.7,
+    val_frac=0.15,
+    test_frac=None,
+    random_seed=42,
+    train_concept_noise_std=0.0,         # <-- concept noise std (default off)
+    train_label_corruption_prob=0.0      # <-- label corruption prob (default off)
 ):
-    """
-    Create train, val, test DataLoaders for a graph dataset with optional noise.
+    # Step 1: Load full dataset (no scaler yet)
+    full_dataset = dataset_class(csv_path=csv_path, graph_dir=graph_dir)
 
-    Parameters
-    ----------
-    dataset_class : type
-        Class of the dataset to load (e.g., GraphConceptClassificationDataset).
-    dataset_path : str
-        Path to dataset files.
-    batch_size : int
-        Batch size for DataLoaders.
-    concept_noise_std : float
-        Std deviation of Gaussian noise for continuous concepts (train set only).
-    label_corruption_prob : float
-        Fraction of labels to randomly corrupt (train set only).
-    train_ratio, val_ratio, test_ratio : float
-        Dataset split ratios.
-    seed : int
-        Random seed for reproducibility.
-    """
+    # Step 2: Split indices
+    dataset_size = len(full_dataset)
+    train_size = int(train_frac * dataset_size)
+    val_size = int(val_frac * dataset_size)
+    test_size = dataset_size - train_size - val_size if test_frac is None else int(test_frac * dataset_size)
 
-    # 1. Load full dataset
-    full_dataset = dataset_class(dataset_path)
-
-    # 2. Train/val/test split
-    total_size = len(full_dataset)
-    train_size = int(train_ratio * total_size)
-    val_size = int(val_ratio * total_size)
-    test_size = total_size - train_size - val_size
-
-    torch.manual_seed(seed)
-    train_dataset, val_dataset, test_dataset = random_split(
-        full_dataset, [train_size, val_size, test_size]
+    generator = torch.Generator().manual_seed(random_seed)
+    train_indices, val_indices, test_indices = torch.utils.data.random_split(
+        range(dataset_size), [train_size, val_size, test_size], generator=generator
     )
 
-    # 3. Add Gaussian noise to continuous concepts (train set only)
-    if concept_noise_std > 0.0:
-        if hasattr(train_dataset.dataset, "concepts"):  # adjust attribute name if needed
-            concepts = train_dataset.dataset.concepts.clone()
-            # Only modify the indices in the train split
-            train_indices = train_dataset.indices
-            noise = torch.randn_like(concepts[train_indices]) * concept_noise_std
-            concepts[train_indices] += noise
-            train_dataset.dataset.concepts = concepts
-        else:
-            print("[Warning] Dataset has no 'concepts' attribute — concept noise skipped.")
+    # Step 3: Fit scaler on train concepts
+    train_concepts = np.stack([full_dataset[i][2] for i in train_indices])
+    scaler = StandardScaler().fit(train_concepts)
 
-    # 4. Randomly corrupt classification labels (train set only)
-    if label_corruption_prob > 0.0:
-        if hasattr(train_dataset.dataset, "labels"):
-            labels = train_dataset.dataset.labels.clone()
-            num_classes = len(torch.unique(labels))
-            train_indices = train_dataset.indices
-            mask = torch.rand(len(train_indices)) < label_corruption_prob
-            for idx, corrupt in zip(train_indices, mask):
-                if corrupt:
-                    current_label = labels[idx].item()
-                    new_label = torch.randint(0, num_classes, (1,)).item()
-                    while new_label == current_label:
-                        new_label = torch.randint(0, num_classes, (1,)).item()
-                    labels[idx] = new_label
-            train_dataset.dataset.labels = labels
-        else:
-            print("[Warning] Dataset has no 'labels' attribute — label corruption skipped.")
+    # Step 4: Create datasets with same scaler
+    train_dataset = dataset_class(csv_path=csv_path, graph_dir=graph_dir, scaler=scaler)
+    val_dataset = dataset_class(csv_path=csv_path, graph_dir=graph_dir, scaler=scaler)
+    test_dataset = dataset_class(csv_path=csv_path, graph_dir=graph_dir, scaler=scaler)
 
-    # 5. Create DataLoaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    # Step 5: Subset to indices
+    train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
+    val_dataset = torch.utils.data.Subset(val_dataset, val_indices)
+    test_dataset = torch.utils.data.Subset(test_dataset, test_indices)
 
-    return train_loader, val_loader, test_loader
+    # Step 6: Apply noise/corruption to train set only
+    if train_concept_noise_std > 0.0:
+        noisy_train_dataset = copy.deepcopy(train_dataset)
+        for i in range(len(noisy_train_dataset)):
+            graph, label, concepts = noisy_train_dataset[i]
+            noise = np.random.normal(loc=0.0, scale=train_concept_noise_std, size=concepts.shape)
+            noisy_train_dataset[i] = (graph, label, concepts + noise)
+        train_dataset = noisy_train_dataset
+
+    if train_label_corruption_prob > 0.0:
+        corrupted_train_dataset = copy.deepcopy(train_dataset)
+        num_classes = len(set([label for _, label, _ in full_dataset]))
+        for i in range(len(corrupted_train_dataset)):
+            graph, label, concepts = corrupted_train_dataset[i]
+            if np.random.rand() < train_label_corruption_prob:
+                new_label = np.random.choice([l for l in range(num_classes) if l != label])
+                corrupted_train_dataset[i] = (graph, new_label, concepts)
+        train_dataset = corrupted_train_dataset
+
+    # Step 7: Create loaders
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+
+    return train_loader, val_loader, test_loader, full_dataset, scaler
