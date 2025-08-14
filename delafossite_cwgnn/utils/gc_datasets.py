@@ -3,311 +3,277 @@ import torch
 import pandas as pd
 import dgl
 import numpy as np
+from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
-from torch.utils.data import Dataset, DataLoader, random_split
-import copy
+from torch.utils.data import DataLoader, Subset
 
-# ---------------------------
-# Utility: make RNG + helpers
-# ---------------------------
-def _make_rng(seed):
-    rng = np.random.RandomState(seed if seed is not None else 42)
-    return rng
-
-def _apply_gaussian_noise(arr, std, apply_prob, rng):
-    """
-    Add elementwise Gaussian noise with optional per-feature masking.
-    Works on numpy arrays; returns a new array.
-    """
-    if std <= 0 or apply_prob <= 0:
-        return arr.copy()
-    mask = rng.rand(*arr.shape) < apply_prob
-    noise = rng.normal(loc=0.0, scale=std, size=arr.shape)
-    noisy = arr.copy()
-    noisy[mask] = noisy[mask] + noise[mask]
-    return noisy
-
-def _corrupt_labels(labels, num_classes, prob, strategy, rng):
-    """
-    Flip labels with probability prob.
-    strategy:
-      - 'uniform': new label is sampled uniformly from other classes
-      - 'adjacent': new label is (y+1) % num_classes (useful for ordinal-ish classes)
-    """
-    if prob <= 0:
-        return labels.copy()
-    labels = np.asarray(labels, dtype=int)
-    noisy = labels.copy()
-    flip_mask = rng.rand(labels.shape[0]) < prob
-    idxs = np.where(flip_mask)[0]
-    if strategy == "adjacent":
-        noisy[idxs] = (labels[idxs] + 1) % num_classes
-    else:  # uniform
-        for i in idxs:
-            choices = list(range(num_classes))
-            choices.remove(labels[i])
-            noisy[i] = rng.choice(choices)
-    return noisy.tolist()
-
-# ---------------------------
-# Base dataset (with noise)
-# ---------------------------
 class BaseGraphConceptDataset(Dataset):
     """
-    Base dataset for graph + concept vector tasks, with optional noise injection.
+    Base dataset for graph + concept vector tasks.
+
+    This class handles:
+        - Reading a CSV file containing IDs, targets, and concept features.
+        - Loading corresponding DGLGraph objects from .bin files.
+        - Extracting concept feature vectors.
 
     CSV Format
     ----------
-    Column 0 : str   -> Structure ID
-    Column 1 : varies -> Target (regression/classification)
-    Columns [concept_start_idx:] : float -> Concept features (will be scaled)
+    Column 0 : str
+        Structure ID (used to find .bin file).
+    Column 1 : varies
+        Target value (numeric for regression, integer/string for classification).
+    Column 2..n : varies
+        Additional metadata or unused columns.
+    Columns [concept_start_idx:] : float
+        Concept features.
 
     Parameters
     ----------
     csv_path : str
+        Path to CSV file.
     graph_dir : str
+        Directory containing .bin graph files.
     concept_start_idx : int, default=2
-    scaler : sklearn StandardScaler or None
-    is_training : bool
-        If scaler is None and is_training=True, fit scaler on this dataset's concepts.
-    noise_config : dict or None
-        {
-          "concept_gaussian_std": float (default 0.0),
-          "concept_apply_prob": float in [0,1] (default 1.0),
-          "seed": int or None (default 42)
-        }
-        Noise is applied in the **scaled** feature space.
-    use_noisy_concepts : bool
-        If True (default), __getitem__ returns noisy concepts (if configured).
+        Index (0-based) of the first concept column.
     """
-    def __init__(self, csv_path, graph_dir, concept_start_idx=2, scaler=None,
-                 is_training=False, noise_config=None, use_noisy_concepts=True):
+    def __init__(self, csv_path, graph_dir, concept_start_idx=2, scaler=None, is_training=False):
         self.data = pd.read_csv(csv_path)
         self.graph_dir = graph_dir
 
-        # IDs
+        # First column = structure ID
         self.structure_ids = self.data.iloc[:, 0].tolist()
 
-        # Concepts
+        # All concept columns start from concept_start_idx
         self.concept_columns = self.data.columns[concept_start_idx:]
-        self.concept_column_names = list(self.concept_columns)
-        raw_concepts = self.data[self.concept_columns].values.astype(float)
+        self.concepts = self.data[self.concept_columns].values.astype(float)
 
-        # Scaling
+        # Save concept column names as a list of strings
+        self.concept_column_names = list(self.concept_columns)
+
+        self.concepts = self.data[self.concept_columns].values.astype(float)
+
+        # Handle scaling
         if scaler is None and is_training:
-            self.scaler = StandardScaler().fit(raw_concepts)
-            self.concepts_scaled = self.scaler.transform(raw_concepts)
+            self.scaler = StandardScaler()
+            self.scaler.fit(self.concepts)
+            self.concepts = self.scaler.transform(self.concepts)
         elif scaler is not None:
             self.scaler = scaler
-            self.concepts_scaled = self.scaler.transform(raw_concepts)
+            self.concepts = self.scaler.transform(self.concepts)
         else:
-            self.scaler = None
-            self.concepts_scaled = raw_concepts  # unscaled
-
-        # Save clean concepts (numpy)
-        self._concepts_clean = self.concepts_scaled.astype(np.float32)
-
-        # Noise settings
-        nc = noise_config or {}
-        self._concept_std = float(nc.get("concept_gaussian_std", 0.0))
-        self._concept_p = float(nc.get("concept_apply_prob", 1.0))
-        self._seed = int(nc.get("seed", 42)) if nc.get("seed", 42) is not None else 42
-
-        # Precompute noisy concepts (deterministic across epochs)
-        rng = _make_rng(self._seed)
-        self._concepts_noisy = _apply_gaussian_noise(self._concepts_clean, self._concept_std, self._concept_p, rng).astype(np.float32)
-
-        # Switch
-        self.use_noisy_concepts = use_noisy_concepts
+            self.scaler = None  # no scaling
 
     def __len__(self):
         return len(self.structure_ids)
 
     def _load_graph(self, struct_id):
+        """
+        Load a DGLGraph from the graph directory using the structure ID.
+        """
         graph_path = os.path.join(self.graph_dir, f"{struct_id}.bin")
         g, _ = dgl.load_graphs(graph_path)
         return g[0]
 
     def _get_concepts(self, idx):
-        if self.use_noisy_concepts:
-            return torch.tensor(self._concepts_noisy[idx], dtype=torch.float32)
-        else:
-            return torch.tensor(self._concepts_clean[idx], dtype=torch.float32)
-
-    # Convenience toggles
-    def enable_concept_noise(self): self.use_noisy_concepts = True
-    def disable_concept_noise(self): self.use_noisy_concepts = False
+        """
+        Return the concept feature vector for a given index as a torch.FloatTensor.
+        """
+        return torch.tensor(self.concepts[idx], dtype=torch.float32)
 
 
 class GraphConceptRegressionDataset(BaseGraphConceptDataset):
     """
-    Regression dataset with optional target noise.
+    Dataset for regression tasks with graph + concept vector inputs.
 
-    Extra noise_config keys:
-      - "regression_target_gaussian_std": float (default 0.0)
+    Parameters
+    ----------
+    csv_path : str
+        Path to CSV file containing structure IDs, targets, and concepts.
+    graph_dir : str
+        Directory containing .bin graph files.
+    concept_start_idx : int, default=2
+        Index of first concept column.
+    target_col : str or None, default=None
+        Column name for target values. If None, uses second column in CSV.
     """
-    def __init__(self, csv_path, graph_dir, concept_start_idx=2, target_col=None,
-                 scaler=None, is_training=False, noise_config=None,
-                 use_noisy_concepts=True, use_noisy_targets=True):
-        super().__init__(csv_path, graph_dir, concept_start_idx, scaler, is_training,
-                         noise_config=noise_config, use_noisy_concepts=use_noisy_concepts)
-
+    def __init__(self, csv_path, graph_dir, concept_start_idx=2, target_col=None, scaler=None, is_training=False):
+        super().__init__(csv_path, graph_dir, concept_start_idx, scaler=scaler, is_training=is_training)
         if target_col is None:
             target_col = self.data.columns[1]
+        self.targets = self.data[target_col].astype(float).tolist()
         self.target_column_name = target_col
 
-        # Clean targets
-        y_clean = self.data[target_col].astype(float).values
-        self._targets_clean = y_clean.astype(np.float32)
-
-        # Target noise
-        rt_std = float((noise_config or {}).get("regression_target_gaussian_std", 0.0))
-        rng = _make_rng((noise_config or {}).get("seed", 42))
-        if rt_std > 0:
-            self._targets_noisy = (self._targets_clean + rng.normal(0.0, rt_std, size=self._targets_clean.shape)).astype(np.float32)
-        else:
-            self._targets_noisy = self._targets_clean.copy()
-
-        self.use_noisy_targets = use_noisy_targets
-
     def __getitem__(self, idx):
+        """
+        Returns
+        -------
+        graph : dgl.DGLGraph
+        target : torch.FloatTensor
+            Shape (1,) regression target.
+        concept_vector : torch.FloatTensor
+            Shape (num_concepts,) concept features.
+        """
         graph = self._load_graph(self.structure_ids[idx])
-        target = self._targets_noisy[idx] if self.use_noisy_targets else self._targets_clean[idx]
+        target = torch.tensor(self.targets[idx], dtype=torch.float32)
         concept_vector = self._get_concepts(idx)
-        return graph, torch.tensor(target, dtype=torch.float32), concept_vector
-
-    # Toggles
-    def enable_target_noise(self): self.use_noisy_targets = True
-    def disable_target_noise(self): self.use_noisy_targets = False
+        return graph, target, concept_vector
 
 
 class GraphConceptClassificationDataset(BaseGraphConceptDataset):
     """
-    Classification dataset with optional label corruption.
+    Dataset for classification tasks with graph + concept vector inputs.
 
-    Extra noise_config keys:
-      - "label_corruption_prob": float in [0,1] (default 0.0)
-      - "label_corruption_strategy": 'uniform' or 'adjacent' (default 'uniform')
+    Parameters
+    ----------
+    csv_path : str
+        Path to CSV file containing structure IDs, targets, and concepts.
+    graph_dir : str
+        Directory containing .bin graph files.
+    concept_start_idx : int, default=2
+        Index of first concept column.
+    target_col : str or None, default=None
+        Column name for target labels. If None, uses second column in CSV.
     """
-    def __init__(self, csv_path, graph_dir, concept_start_idx=2, target_col=None,
-                 scaler=None, is_training=False, noise_config=None,
-                 use_noisy_concepts=True, use_noisy_labels=True):
-        super().__init__(csv_path, graph_dir, concept_start_idx, scaler, is_training,
-                         noise_config=noise_config, use_noisy_concepts=use_noisy_concepts)
 
+    def __init__(self, csv_path, graph_dir, concept_start_idx=2, target_col=None, scaler=None, is_training=False):
+        super().__init__(csv_path, graph_dir, concept_start_idx, scaler=scaler, is_training=is_training)
         if target_col is None:
             target_col = self.data.columns[1]
+
+        if pd.api.types.is_numeric_dtype(self.data[target_col]):
+            self.targets = self.data[target_col].astype(int).tolist()
+        else:
+            self.targets = pd.Categorical(self.data[target_col]).codes.tolist()
+
         self.target_column_name = target_col
 
-        # Clean integer labels
-        if pd.api.types.is_numeric_dtype(self.data[target_col]):
-            y_clean = self.data[target_col].astype(int).tolist()
-        else:
-            y_clean = pd.Categorical(self.data[target_col]).codes.tolist()
-        self._labels_clean = y_clean
-        self._num_classes = len(set(y_clean))
-
-        # Corruption
-        nc = noise_config or {}
-        p = float(nc.get("label_corruption_prob", 0.0))
-        strat = str(nc.get("label_corruption_strategy", "uniform"))
-        rng = _make_rng(nc.get("seed", 42))
-        self._labels_noisy = _corrupt_labels(self._labels_clean, self._num_classes, p, strat, rng)
-
-        self.use_noisy_labels = use_noisy_labels
-
     def __getitem__(self, idx):
+        """
+        Returns
+        -------
+        graph : dgl.DGLGraph
+        target : torch.LongTensor
+            Shape (1,) classification label.
+        concept_vector : torch.FloatTensor
+            Shape (num_concepts,) concept features.
+        """
         graph = self._load_graph(self.structure_ids[idx])
-        label = self._labels_noisy[idx] if self.use_noisy_labels else self._labels_clean[idx]
+        target = torch.tensor(self.targets[idx], dtype=torch.long)
         concept_vector = self._get_concepts(idx)
-        return graph, torch.tensor(label, dtype=torch.long), concept_vector
+        return graph, target, concept_vector
 
     @property
     def num_classes(self):
-        return self._num_classes
-
-    # Toggles
-    def enable_label_corruption(self): self.use_noisy_labels = True
-    def disable_label_corruption(self): self.use_noisy_labels = False
+        """
+        Number of unique classification labels.
+        """
+        return len(set(self.targets))
 
 
 def collate_fn(batch):
-    graphs, labels, concepts = zip(*batch)
+    """
+    Collate function for DataLoader.
+
+    Parameters
+    ----------
+    batch : list of tuples
+        Each tuple is (graph, label, concept_vector).
+
+    Returns
+    -------
+    batched_graph : dgl.DGLGraph
+        All graphs in batch combined into one batched graph.
+    labels : torch.Tensor
+        Targets stacked into a tensor (dtype depends on dataset type).
+    concepts : torch.FloatTensor
+        Shape (batch_size, num_concepts) concept features.
+    """
+    graphs, labels, concepts = zip(*batch)  # unzip tuples
     batched_graph = dgl.batch(graphs)
-    labels = torch.stack(labels)
+    labels = torch.stack(labels)  # keeps dtype from dataset
     concepts = torch.stack(concepts)
     return batched_graph, labels, concepts
 
+def create_graph_dataloaders(dataset_cls, csv_path, graph_dir,
+                             batch_size=32, concept_start_idx=2,
+                             target_col=None, scaler=None,
+                             train_frac=0.7, val_frac=0.15, test_frac=None,
+                             collate_fn=None, shuffle=True, random_seed=42,
+                             train_concept_noise_std=0.0,
+                             train_label_corruption_prob=0.0):
+    """
+    Create train, val, test DataLoaders for GraphConceptDataset objects.
 
-import copy
-import torch
-import numpy as np
-from torch.utils.data import DataLoader, random_split
-from sklearn.preprocessing import StandardScaler
+    Extra Parameters
+    ----------------
+    train_concept_noise_std : float, default=0.0
+        Std. dev. of Gaussian noise added to concept vectors in train set.
+    train_label_corruption_prob : float, default=0.0
+        Probability of corrupting a label in the train set.
+    """
+    np.random.seed(random_seed)
 
-def create_graph_dataloaders(
-    dataset_class,
-    csv_path,
-    graph_dir,
-    batch_size,
-    collate_fn,
-    train_frac=0.7,
-    val_frac=0.15,
-    test_frac=None,
-    random_seed=42,
-    train_concept_noise_std=0.0,         # <-- concept noise std (default off)
-    train_label_corruption_prob=0.0      # <-- label corruption prob (default off)
-):
-    # Step 1: Load full dataset (no scaler yet)
-    full_dataset = dataset_class(csv_path=csv_path, graph_dir=graph_dir)
+    # Step 1: Load full dataset WITHOUT scaling
+    full_dataset = dataset_cls(csv_path, graph_dir,
+                               concept_start_idx=concept_start_idx,
+                               target_col=target_col, scaler=None,
+                               is_training=False)
 
-    # Step 2: Split indices
-    dataset_size = len(full_dataset)
-    train_size = int(train_frac * dataset_size)
-    val_size = int(val_frac * dataset_size)
-    test_size = dataset_size - train_size - val_size if test_frac is None else int(test_frac * dataset_size)
+    n = len(full_dataset)
+    if test_frac is None:
+        test_frac = 1.0 - train_frac - val_frac
+    assert train_frac + val_frac + test_frac <= 1.0 + 1e-6, "Fractions must sum <= 1"
 
-    generator = torch.Generator().manual_seed(random_seed)
-    train_indices, val_indices, test_indices = torch.utils.data.random_split(
-        range(dataset_size), [train_size, val_size, test_size], generator=generator
-    )
+    # Step 2: Shuffle indices
+    indices = np.arange(n)
+    if shuffle:
+        np.random.shuffle(indices)
 
-    # Step 3: Fit scaler on train concepts
-    train_concepts = np.stack([full_dataset[i][2] for i in train_indices])
-    scaler = StandardScaler().fit(train_concepts)
+    n_train = int(n * train_frac)
+    n_val = int(n * val_frac)
+    n_test = n - n_train - n_val
 
-    # Step 4: Create datasets with same scaler
-    train_dataset = dataset_class(csv_path=csv_path, graph_dir=graph_dir, scaler=scaler)
-    val_dataset = dataset_class(csv_path=csv_path, graph_dir=graph_dir, scaler=scaler)
-    test_dataset = dataset_class(csv_path=csv_path, graph_dir=graph_dir, scaler=scaler)
+    train_idx = indices[:n_train]
+    val_idx = indices[n_train:n_train + n_val]
+    test_idx = indices[n_train + n_val:]
 
-    # Step 5: Subset to indices
-    train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
-    val_dataset = torch.utils.data.Subset(val_dataset, val_indices)
-    test_dataset = torch.utils.data.Subset(test_dataset, test_indices)
+    # Step 3: Fit scaler on training concepts if not provided
+    if scaler is None:
+        train_concepts = full_dataset.concepts[train_idx]
+        scaler = StandardScaler()
+        scaler.fit(train_concepts)
 
-    # Step 6: Apply noise/corruption to train set only
+    # Step 4: Recreate dataset with scaler applied
+    scaled_dataset = dataset_cls(csv_path, graph_dir,
+                                 concept_start_idx=concept_start_idx,
+                                 target_col=target_col, scaler=scaler,
+                                 is_training=False)
+
+    # Step 5: Create subsets
+    train_ds = Subset(scaled_dataset, train_idx)
+    val_ds = Subset(scaled_dataset, val_idx)
+    test_ds = Subset(scaled_dataset, test_idx)
+
+    # Step 6: Apply concept noise
     if train_concept_noise_std > 0.0:
-        noisy_train_dataset = copy.deepcopy(train_dataset)
-        for i in range(len(noisy_train_dataset)):
-            graph, label, concepts = noisy_train_dataset[i]
-            noise = np.random.normal(loc=0.0, scale=train_concept_noise_std, size=concepts.shape)
-            noisy_train_dataset[i] = (graph, label, concepts + noise)
-        train_dataset = noisy_train_dataset
+        for i in range(len(train_ds)):
+            g, y, c = train_ds[i]
+            noise = torch.randn_like(c) * train_concept_noise_std
+            c_noisy = c + noise
+            train_ds.dataset.concepts[train_idx[i]] = c_noisy.numpy()
 
+    # Step 7: Apply label corruption
     if train_label_corruption_prob > 0.0:
-        corrupted_train_dataset = copy.deepcopy(train_dataset)
-        num_classes = len(set([label for _, label, _ in full_dataset]))
-        for i in range(len(corrupted_train_dataset)):
-            graph, label, concepts = corrupted_train_dataset[i]
+        all_labels = list(set(scaled_dataset.targets))
+        for i in range(len(train_ds)):
             if np.random.rand() < train_label_corruption_prob:
-                new_label = np.random.choice([l for l in range(num_classes) if l != label])
-                corrupted_train_dataset[i] = (graph, new_label, concepts)
-        train_dataset = corrupted_train_dataset
+                current_label = train_ds.dataset.targets[train_idx[i]]
+                new_label = np.random.choice([l for l in all_labels if l != current_label])
+                train_ds.dataset.targets[train_idx[i]] = new_label
 
-    # Step 7: Create loaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    # Step 8: Create DataLoaders
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
-    return train_loader, val_loader, test_loader, full_dataset, scaler
+    return train_loader, val_loader, test_loader, scaled_dataset, scaler
