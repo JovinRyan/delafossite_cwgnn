@@ -2,6 +2,7 @@ import os
 import torch
 import torch.nn.functional as F
 import csv
+import time
 from sklearn.metrics import r2_score, accuracy_score
 
 def evaluate(model, dataloader, device, concepts_are_continuous=True):
@@ -50,27 +51,26 @@ def evaluate(model, dataloader, device, concepts_are_continuous=True):
 
     return cls_metric, concept_metrics
 
-
 def train_model(model, train_loader, val_loader, test_loader, device,
                 optimizer, scheduler=None, num_epochs=50, patience=5,
                 save_path="checkpoints/best_model.pth",
                 concepts_are_continuous=True,
                 early_stopping=True,
-                concept_loss_weight=1.0,  # single scalar
+                concept_loss_weight=1.0,
                 cls_loss_weight=1.0):
-    """
-    Training loop for EGNN or EdgeConvNet CW models.
-    Handles CW rotation updates and logs metrics.
-    """
+
     model = model.to(device)
     best_val_acc = 0.0
     epochs_no_improve = 0
     metrics = []
+    epoch_times = []  # store per-epoch times
 
     uses_cw = hasattr(model, "change_mode") and hasattr(model, "update_rotation_matrix")
     num_concepts = model.concept_head.out_features
 
     for epoch in range(1, num_epochs + 1):
+        start_time = time.time()  # start timing
+
         model.train()
         total_cls_loss, total_concept_loss = 0.0, 0.0
         total_correct, total_samples_cls = 0, 0
@@ -78,7 +78,6 @@ def train_model(model, train_loader, val_loader, test_loader, device,
 
         concept_indices = range(num_concepts) if uses_cw else [None]
 
-        # --- CW / concept loop ---
         for concept_idx in concept_indices:
             if uses_cw:
                 model.change_mode(concept_idx)
@@ -90,7 +89,6 @@ def train_model(model, train_loader, val_loader, test_loader, device,
                 _, logits, concept_logits = model(g, g.ndata['feat'].to(device))
                 loss = 0.0
 
-                # Concept loss (single weight)
                 if concept_idx is not None:
                     loss_concept = F.mse_loss(concept_logits[:, concept_idx],
                                               concept_labels[:, concept_idx].float())
@@ -98,7 +96,6 @@ def train_model(model, train_loader, val_loader, test_loader, device,
                     concept_losses_epoch[concept_idx] += loss_concept.item() * labels.size(0)
                     total_concept_loss += loss_concept.item() * labels.size(0)
 
-                # Classification loss
                 if concept_idx is None or concept_idx == 0:
                     loss_cls = F.cross_entropy(logits, labels) * cls_loss_weight
                     loss += loss_cls
@@ -113,29 +110,28 @@ def train_model(model, train_loader, val_loader, test_loader, device,
             if uses_cw:
                 model.update_rotation_matrix()
 
-        # Restore whitening mode for evaluation
         if uses_cw:
             model.change_mode(-1)
 
-        # --- Compute averages ---
         train_cls_loss = total_cls_loss / max(1, total_samples_cls)
         train_concept_loss = total_concept_loss / max(1, len(train_loader.dataset))
         train_acc = total_correct / max(1, total_samples_cls)
 
-        # --- Evaluate ---
         val_cls_acc, val_concept_metrics = evaluate(model, val_loader, device, concepts_are_continuous)
         test_cls_acc, test_concept_metrics = evaluate(model, test_loader, device, concepts_are_continuous)
 
-        # Scheduler step
         if scheduler is not None:
             scheduler.step(val_cls_acc)
 
-        # --- Logging ---
-        print(f"Epoch {epoch:02d} | Train CLS Loss: {train_cls_loss:.4f} "
+        # end timing and record
+        epoch_time = time.time() - start_time
+        epoch_times.append(epoch_time)
+
+        print(f"Epoch {epoch:02d} | Time: {epoch_time:.2f}s "
+              f"| Train CLS Loss: {train_cls_loss:.4f} "
               f"CONCEPT Loss: {train_concept_loss:.4f} Acc: {train_acc:.4f}")
         print(f"          Val CLS Acc: {val_cls_acc:.4f} Val Concept Metric: {val_concept_metrics}")
         print(f"          Test CLS Acc: {test_cls_acc:.4f} Test Concept Metric: {test_concept_metrics}")
-        print(f"          Concept Loss Weight: {concept_loss_weight}")
         print(f"          LR: {optimizer.param_groups[0]['lr']:.6f}")
 
         metrics.append({
@@ -147,9 +143,9 @@ def train_model(model, train_loader, val_loader, test_loader, device,
             'val_concept_metrics': val_concept_metrics,
             'test_cls_acc': test_cls_acc,
             'test_concept_metrics': test_concept_metrics,
+            'epoch_time': epoch_time
         })
 
-        # --- Early stopping ---
         if val_cls_acc > best_val_acc:
             best_val_acc = val_cls_acc
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -162,17 +158,19 @@ def train_model(model, train_loader, val_loader, test_loader, device,
                 print(f"Early stopping at epoch {epoch} — no improvement in {patience} epochs.")
                 break
 
-    # --- Save metrics ---
     csv_path_metrics = os.path.splitext(save_path)[0] + "_metrics.csv"
     with open(csv_path_metrics, mode='w', newline='') as csvfile:
         fieldnames = ['epoch', 'train_cls_loss', 'train_concept_loss', 'train_acc',
-                      'val_cls_acc', 'val_concept_metrics', 'test_cls_acc', 'test_concept_metrics']
+                      'val_cls_acc', 'val_concept_metrics', 'test_cls_acc', 'test_concept_metrics', 'epoch_time']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for row in metrics:
             writer.writerow(row)
 
+    avg_time = sum(epoch_times) / len(epoch_times)
     print("Training finished.")
     print(f"Best val classification accuracy (monitor): {best_val_acc:.4f}")
+    print(f"Average time per epoch: {avg_time:.2f}s")
     print(f"Training metrics saved to {csv_path_metrics}")
     return metrics
+
